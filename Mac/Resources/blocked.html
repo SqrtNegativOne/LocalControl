@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blocked · LocalControl</title>
+<style>
+  :root { --bg: #f6f5f2; --panel: #fff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e4e2dc; --accent: #2f5d50; --bad: #b3412f; --ok: #2f7a4f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe7; --muted: #9a988f; --line: #31302c; --accent: #7fb8a4; --bad: #ef7f6b; --ok: #6cc28f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; padding: 16px; }
+  .card { max-width: 560px; width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .url { color: var(--muted); font-size: 13px; word-break: break-all; margin: 0 0 18px; }
+  .reason { border-left: 3px solid var(--bad); padding: 2px 0 2px 12px; margin: 0 0 16px; }
+  .rule { color: var(--muted); font-size: 14px; margin: 0 0 22px; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  textarea { width: 100%; min-height: 80px; margin-top: 10px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; resize: vertical; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button, a.btn { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; background: var(--accent); color: var(--panel); text-decoration: none; }
+  a.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .5; cursor: progress; }
+  #result { font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Not part of the plan right now</h1>
+  <p class="url" id="url"></p>
+  <p class="reason" id="reason"></p>
+  <p class="rule" id="rule"></p>
+  <details>
+    <summary>I actually need this for my task</summary>
+    <textarea id="why" placeholder="Explain how this page fits the rule…"></textarea>
+    <div class="row">
+      <button id="appeal">Ask to allow</button>
+      <span id="result"></span>
+    </div>
+  </details>
+  <div class="row" style="margin-top: 22px">
+    <span class="url">The rule and recent decisions are in the LocalControl menu bar icon.</span>
+  </div>
+</div>
+<script>
+const id = new URLSearchParams(location.search).get("id");
+let url = "", title = "";
+fetch(`/api/block?id=${encodeURIComponent(id)}`).then((r) => r.json()).then((b) => {
+  url = b.url || ""; title = b.title || "";
+  document.getElementById("url").textContent = title ? `${title} — ${url}` : url;
+  document.getElementById("reason").textContent = b.reason || "This doesn't fit your current rule.";
+  document.getElementById("rule").textContent = b.rule ? `Your rule: ${b.rule}` : "";
+});
+document.getElementById("appeal").onclick = async () => {
+  const why = document.getElementById("why").value.trim();
+  const res = document.getElementById("result"), btn = document.getElementById("appeal");
+  if (!why) { document.getElementById("why").focus(); return; }
+  btn.disabled = true; res.textContent = "Asking the local model…"; res.style.color = "";
+  try {
+    const r = await (await fetch("/api/appeal", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({url, title, justification: why})})).json();
+    res.textContent = r.reason; res.style.color = r.allowed ? "var(--ok)" : "var(--bad)";
+    if (r.allowed && url) setTimeout(() => location.href = url, 900);
+  } finally { btn.disabled = false; }
+};
+</script>
+</body>
+</html>

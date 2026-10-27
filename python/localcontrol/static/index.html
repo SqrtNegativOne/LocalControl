@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalControl</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e4e2dc;
+    --accent: #2f5d50; --ok: #2f7a4f; --bad: #b3412f; --warn: #a06a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe7; --muted: #9a988f; --line: #31302c;
+            --accent: #7fb8a4; --ok: #6cc28f; --bad: #ef7f6b; --warn: #e0b04f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.ok::before, .pill.bad::before { content: "●"; margin-right: 6px; }
+  .pill.ok::before { color: var(--ok); } .pill.bad::before { color: var(--bad); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  textarea { width: 100%; min-height: 72px; resize: vertical; font: inherit; color: inherit; background: var(--bg);
+             border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  input[type=number] { width: 90px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; background: var(--accent); color: var(--panel); }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .5; cursor: progress; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .rule { font-size: 17px; margin: 0 0 6px; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 8px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 7px; border-radius: 4px; margin-right: 8px; }
+  .tag.allow { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+  .tag.block { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .tag.info { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 8px; align-items: center; padding: 4px 0; font-size: 14px; }
+  .bar .track { grid-column: 1 / -1; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: -2px; }
+  .bar .fill { height: 100%; background: var(--accent); }
+  .bar .t { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .err { color: var(--warn); font-size: 13px; white-space: pre-wrap; margin-top: 8px; }
+  .examples .chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 8px; max-width: 100%; }
+  .examples .chip button { border: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .examples .chip .count { font-size: 11px; color: var(--muted); padding-right: 2px; }
+  .examples .chip .x { color: var(--muted); padding: 4px 8px 4px 2px; }
+  .examples button { background: transparent; color: var(--accent); border: 1px dashed var(--line); font-weight: 500; font-size: 13px; padding: 4px 10px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>LocalControl</h1>
+    <span id="model" class="pill">connecting…</span>
+  </header>
+
+  <section id="active" hidden>
+    <h2>Active rule</h2>
+    <p class="rule" id="rule"></p>
+    <p class="muted small" id="cmd"></p>
+    <div class="row" style="justify-content: space-between">
+      <span class="timer" id="timer"></span>
+      <span class="muted small" id="lockedUntil"></span>
+    </div>
+  </section>
+
+  <section id="new">
+    <h2>Tell me how this computer should be used</h2>
+    <textarea id="text" placeholder="For the next hour, I can only use this laptop to read papers or search for papers or technical material."></textarea>
+    <div class="row examples" id="saved"></div>
+    <div class="row examples" id="examples">
+      <button data-ex="For the next hour, I can only use this laptop to read papers or search for papers or technical material.">Papers only, 1h</button>
+      <button data-ex="For 45 minutes, only writing and coding — no email, chat, or social media.">Deep work, 45m</button>
+      <button data-ex="Until 6pm, anything except social media, news, and YouTube.">No feeds until 6pm</button>
+    </div>
+    <div class="row">
+      <button id="go">Lock in</button>
+      <label class="muted small">Minutes <input type="number" id="minutes" min="1" max="720" placeholder="auto"></label>
+      <span class="muted small" id="goStatus"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Right now</h2>
+    <div id="now" class="ellip muted">—</div>
+    <div id="nowVerdict" class="small muted"></div>
+    <div id="error" class="err" hidden></div>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Decisions</h2>
+      <ul id="decisions"><li class="muted small">Nothing judged yet.</li></ul>
+    </section>
+    <section>
+      <h2>Today</h2>
+      <div id="sites"></div>
+      <div id="apps" style="margin-top: 16px"></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fmtDur = (s) => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round(s % 3600 / 60)}m` : `${Math.round(s / 60)}m`;
+const fmtClock = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  return r.json();
+}
+
+let expiresAt = null;
+function tickTimer() {
+  if (expiresAt === undefined) return;
+  $("timer").textContent = fmtClock(expiresAt - Date.now() / 1000) + " left";
+}
+setInterval(tickTimer, 1000);
+
+function bars(el, title, rows) {
+  if (!rows.length) { el.innerHTML = `<h2>${title}</h2><p class="muted small">No activity yet.</p>`; return; }
+  const max = rows[0][1] || 1;
+  el.innerHTML = `<h2>${title}</h2>` + rows.slice(0, 8).map(([k, v]) =>
+    `<div class="bar"><span class="ellip">${esc(k)}</span><span class="t">${fmtDur(v)}</span>
+     <div class="track"><div class="fill" style="width:${(v / max * 100).toFixed(1)}%"></div></div></div>`).join("");
+}
+
+function decisionRow(d) {
+  if (d.event === "policy") return `<li><span class="tag info">Rule</span>${esc(d.rule)} <span class="muted small">· ${fmtTime(d.ts)}</span></li>`;
+  if (d.event === "policy_end") return `<li><span class="tag info">Ended</span><span class="muted">${esc(d.reason)}</span> <span class="muted small">· ${fmtTime(d.ts)}</span></li>`;
+  if (d.event === "appeal") return `<li><span class="tag ${d.allowed ? "allow" : "block"}">Appeal</span>${esc(d.url)}<div class="small muted">${esc(d.reason)}</div></li>`;
+  const a = d.activity || {};
+  return `<li><div class="ellip"><span class="tag ${d.allowed ? "allow" : "block"}">${d.allowed ? "Allow" : "Block"}</span>${esc(a.label)}</div>
+    <div class="small muted">${esc(d.reason)}${d.scope === "site" ? " (whole site)" : ""} · ${fmtTime(d.ts)}</div></li>`;
+}
+
+async function refresh() {
+  let st;
+  try { st = await (await fetch("/api/state")).json(); } catch { $("model").textContent = "server offline"; $("model").className = "pill bad"; return; }
+  $("model").textContent = st.model.status + (st.dry_run ? " · dry run" : "") + ` · vision ${st.model.vision}`;
+  $("model").className = "pill " + (st.model.ok ? "ok" : "bad");
+
+  const p = st.policy;
+  $("active").hidden = !p;
+  $("new").hidden = !!p;
+  if (p) {
+    $("rule").textContent = p.rule; $("cmd").textContent = `You said: “${p.command}”`; expiresAt = p.expires_at;
+    $("lockedUntil").textContent = `Locked in until ${fmtTime(p.expires_at)}`;
+  }
+  else expiresAt = undefined;
+  tickTimer();
+
+  const c = st.current;
+  $("now").textContent = c ? c.label : "—";
+  const v = c && c.verdict;
+  $("nowVerdict").innerHTML = !p ? "No rule active — just tracking usage." :
+    v ? `<span class="tag ${v.allowed ? "allow" : "block"}">${v.allowed ? "Allowed" : "Blocked"}</span>${esc(v.reason)}` : "Judging…";
+  $("error").hidden = !st.error; $("error").textContent = st.error || "";
+
+  if (st.decisions.length) $("decisions").innerHTML = st.decisions.map(decisionRow).join("");
+  renderSaved(st.prompts || []);
+  bars($("sites"), "Websites today", st.usage.sites);
+  bars($("apps"), "Apps today", st.usage.apps);
+}
+
+let savedSig = "";
+function renderSaved(prompts) {
+  const sig = JSON.stringify(prompts.map((p) => [p.text, p.count]));
+  if (sig === savedSig) return;  // don't rebuild under the cursor every 2s
+  savedSig = sig;
+  $("examples").hidden = prompts.length > 0;
+  $("saved").innerHTML = prompts.map((p, i) =>
+    `<span class="chip"><button data-i="${i}" title="${esc(p.text)}">${esc(p.text.length > 60 ? p.text.slice(0, 57) + "…" : p.text)}</button>` +
+    `<span class="count">${p.count}×</span><button class="x" data-x="${i}" title="Forget">×</button></span>`).join("");
+  $("saved").querySelectorAll("[data-i]").forEach((b) => b.onclick = () => {
+    const p = prompts[b.dataset.i]; $("text").value = p.text; $("minutes").value = p.minutes ? Math.round(p.minutes) : ""; $("text").focus();
+  });
+  $("saved").querySelectorAll("[data-x]").forEach((b) => b.onclick = async () => {
+    await post("/api/prompts/forget", {text: prompts[b.dataset.x].text}); refresh();
+  });
+}
+
+$("go").onclick = async () => {
+  const text = $("text").value.trim();
+  if (!text) { $("text").focus(); return; }
+  $("go").disabled = true; $("goStatus").textContent = "Interpreting with the local model…";
+  try {
+    const r = await post("/api/command", {text, minutes: $("minutes").value || null});
+    $("goStatus").textContent = r.ok ? "" : (r.error || "Failed");
+    if (r.ok) { $("text").value = ""; $("minutes").value = ""; }
+  } finally { $("go").disabled = false; refresh(); }
+};
+document.querySelectorAll("[data-ex]").forEach((b) => b.onclick = () => { $("text").value = b.dataset.ex; $("text").focus(); });
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("go").click(); });
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.eugenevinitsky.localcontrol.agent</string>
+    <key>BundleProgram</key><string>Contents/MacOS/LocalControl</string>
+    <key>RunAtLoad</key><true/>
+    <!-- Relaunch after a crash, kill or force quit; a normal Quit (only allowed with no rule active) stays quit. -->
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>ThrottleInterval</key><integer>2</integer>
+    <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

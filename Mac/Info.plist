@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>LocalControl</string>
+    <key>CFBundleDisplayName</key><string>LocalControl</string>
+    <key>CFBundleIdentifier</key><string>com.eugenevinitsky.localcontrol</string>
+    <key>CFBundleExecutable</key><string>LocalControl</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>LocalControl reads your active browser tab to check it against your rule, and redirects tabs that don't fit. Nothing leaves your Mac.</string>
+</dict>
+</plist>
