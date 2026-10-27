@@ -10,7 +10,7 @@ struct Verdict: Codable, Equatable {
 }
 
 struct Decision: Identifiable, Codable {
-    enum Kind: String, Codable { case judge, appeal, rule, ruleEnd }
+    enum Kind: String, Codable { case judge, appeal, rule, ruleEnd, alert }
     var id = UUID()
     var ts = Date()
     var kind: Kind
@@ -57,6 +57,28 @@ enum JudgePrompt {
     struct Reply: Decodable { var reason: String; var allowed: Bool; var scope: String }
 }
 
+enum HostPrompt {
+    static let system = """
+    You control the network filter of a focus tool. The user set a rule for how their computer may be used \
+    right now. A program is connecting to the website below; decide whether to block it.
+
+    Pages are also checked one by one in the browser, so the network filter is a backstop:
+    - Block only if essentially everything on the website falls outside the rule, e.g. a social network or \
+    messaging app (X/Twitter, Bluesky, Facebook, Instagram, TikTok, Threads, Messenger), video streaming or \
+    entertainment, shopping, sports, gossip or news, or a game, under a rule that doesn't permit them.
+    - Allow infrastructure: CDNs, APIs, fonts, analytics, ads, login/SSO, payments, cloud storage, sync, \
+    software updates, captchas, telemetry.
+    - Allow websites with mixed content where some use could fit the rule (search engines, Google, YouTube, \
+    Reddit, GitHub, Wikipedia, Medium).
+    - Allow anything you don't recognise or are unsure about.
+    - reason: one short sentence addressed to the user.
+    """
+    static let schema = #"""
+    {"type":"object","properties":{"reason":{"type":"string"},"block":{"type":"boolean"}},"required":["reason","block"]}
+    """#
+    struct Reply: Decodable { var reason: String; var block: Bool }
+}
+
 @MainActor
 final class Engine: ObservableObject {
     static let systemApps: Set<String> = [
@@ -93,6 +115,13 @@ final class Engine: ObservableObject {
     private var lastRuleID: String?
     private var timer: Timer?
     let port: UInt16 = 8765
+    /// Site-level verdicts for the network filter, for `hostRuleID`.
+    private var hostVerdicts: [String: Bool] = [:]
+    private var hostRuleID: String?
+    private var lastPushed: FilterState?
+    private var lastPush = Date.distantPast
+    var filter: FilterClient?
+    var watchdog: Watchdog?
 
     static let dataDir: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -152,6 +181,8 @@ final class Engine: ObservableObject {
             notify("LocalControl", "Your rule has ended.")
         }
         lastRuleID = sync.activeRule?.id
+        watchdog?.check()
+        pushFilterState()
 
         guard let act = Probe.observe() else { return }
         if Probe.idleSeconds < 120 { addUsage(act, dt) }
@@ -194,8 +225,8 @@ final class Engine: ObservableObject {
             }
         }
         let (site, page) = act.cacheKeys
-        let allowedByAppeal = overrides[rule.id] ?? []
-        if allowedByAppeal.contains(page) || allowedByAppeal.contains(site) {
+        let appeals = overrides[rule.id] ?? []
+        if appeals.contains(page) || appeals.contains(site) {
             return Verdict(allowed: true, reason: "Allowed by your appeal", source: .appeal)
         }
         if var v = cache[page] ?? cache[site] {
@@ -262,6 +293,71 @@ final class Engine: ObservableObject {
         return v
     }
 
+    // MARK: network filter
+
+    /// Asked by the network filter about a host it hasn't seen; true allows it.
+    func judgeHost(_ host: String, app: String) async -> Bool {
+        guard let rule = sync.activeRule else { return true }
+        if hostRuleID != rule.id { hostVerdicts = [:]; hostRuleID = rule.id }
+        let site = FilterHosts.site(host)
+        if let v = hostVerdicts[site] { return v }
+        if allowedByAppeal(rule).contains(site) { return true }
+        if cacheRuleID == rule.id, let v = cache["site:\(site)"] { return v.allowed }
+        do {
+            let r = try await ollama.chatJSON(
+                HostPrompt.Reply.self, system: HostPrompt.system,
+                user: "RULE: \(rule.rule)\n(Original instruction: \"\(rule.command)\")\n\nWebsite: \(site)\n"
+                    + "Connection to: \(host)\nProgram: \(app)",
+                schema: HostPrompt.schema)
+            if hostRuleID == rule.id { hostVerdicts[site] = !r.block }
+            if r.block { log(Decision(kind: .judge, label: "Network: \(site)", allowed: false, reason: r.reason)) }
+            return !r.block
+        } catch {
+            lastError = error.localizedDescription
+            reviveOllama()
+            return false  // fail closed, uncached
+        }
+    }
+
+    /// Sites allowed by an appeal under `rule`.
+    private func allowedByAppeal(_ rule: Rule) -> Set<String> {
+        Set((overrides[rule.id] ?? []).compactMap { key -> String? in
+            if key.hasPrefix("site:") { return FilterHosts.site(String(key.dropFirst(5))) }
+            if key.hasPrefix("page:") { return URLComponents(string: String(key.dropFirst(5)))?.host.map(FilterHosts.site) }
+            return nil
+        })
+    }
+
+    private func filterState() -> FilterState {
+        guard let rule = sync.activeRule else { return FilterState() }
+        var s = FilterState(ruleID: rule.id, expiresAt: rule.expiresAt)
+        if hostRuleID == rule.id {
+            for (site, allowed) in hostVerdicts { if allowed { s.allowed.insert(site) } else { s.blocked.insert(site) } }
+        }
+        if cacheRuleID == rule.id {
+            for (key, v) in cache where key.hasPrefix("site:") && v.scope == "site" {
+                let domain = String(key.dropFirst(5))
+                if v.allowed { s.allowed.insert(domain) } else { s.blocked.insert(domain) }
+            }
+        }
+        // An appeal for a page has to get through the network filter too.
+        let appealed = allowedByAppeal(rule)
+        s.blocked = s.blocked.filter { !appealed.contains(FilterHosts.site($0)) }
+        s.allowed.formUnion(appealed)
+        return s
+    }
+
+    /// Sends the rule to the network filter when it changes, and every 30 s as a liveness check.
+    private func pushFilterState() {
+        guard let filter else { return }
+        if sync.activeRule != nil, filter.status == .off { Task { await filter.enable() } }
+        let state = filterState()
+        guard state != lastPushed || Date().timeIntervalSince(lastPush) > 30 else { return }
+        filter.push(state)
+        lastPushed = state
+        lastPush = Date()
+    }
+
     // MARK: enforcement
 
     private func enforce(_ act: Activity, _ v: Verdict, rule: Rule) {
@@ -290,6 +386,13 @@ final class Engine: ObservableObject {
         p.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
         p.arguments = ["services", "start", "ollama"]
         try? p.run()
+    }
+
+    /// Tampering noticed by the watchdog.
+    func recordAlert(_ message: String, partnerTold: Bool) {
+        log(Decision(kind: .alert, label: message, allowed: false,
+                     reason: partnerTold ? "Your accountability partner was notified." : ""))
+        notify(partnerTold ? "LocalControl alerted your partner" : "LocalControl", message)
     }
 
     func reportError(_ message: String) {

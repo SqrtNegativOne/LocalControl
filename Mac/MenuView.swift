@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuView: View {
     @EnvironmentObject var engine: Engine
     @EnvironmentObject var sync: CloudSync
+    @EnvironmentObject var filter: FilterClient
 
     @State private var command = ""
     @State private var minutes = ""
@@ -134,6 +135,7 @@ struct MenuView: View {
                     case .judge, .appeal: Tag(allowed: d.allowed, appeal: d.kind == .appeal)
                     case .rule: Text("RULE").tagStyle(.blue)
                     case .ruleEnd: Text("ENDED").tagStyle(.gray)
+                    case .alert: Text("ALERT").tagStyle(.orange)
                     }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(d.label).lineLimit(1).truncationMode(.middle)
@@ -161,6 +163,19 @@ struct MenuView: View {
             }
             .font(.caption)
         }
+        switch filter.status {
+        case .needsApproval:
+            Button("Allow the LocalControl network filter in System Settings") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
+            }
+            .font(.caption)
+        case .off:
+            Button("Turn on the network filter") { Task { await filter.enable() } }.font(.caption)
+        case .failed(let message):
+            Text("Network filter: \(message)").font(.caption).foregroundStyle(.orange)
+        case .checking, .on:
+            EmptyView()
+        }
         if AppDelegate.agentStatus == .requiresApproval {
             Button("Allow LocalControl in Login Items so it restarts if closed") {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
@@ -184,6 +199,8 @@ struct MenuView: View {
                 }
                 .pickerStyle(.segmented)
                 .font(.caption)
+                Divider()
+                AccountabilitySettings(locked: sync.rule?.isActive == true)
             }
             HStack {
                 Button(showSettings ? "Done" : "Settings") { showSettings.toggle() }
@@ -197,6 +214,58 @@ struct MenuView: View {
             .buttonStyle(.borderless)
             .font(.caption)
         }
+    }
+}
+
+private struct AccountabilitySettings: View {
+    @EnvironmentObject var accountability: Accountability
+    let locked: Bool
+    @State private var handle = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionTitle("Accountability partner")
+            if accountability.isConfigured {
+                Text("\(accountability.partner ?? "") is texted if LocalControl is stopped or tampered with during a rule.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Send test alert") { accountability.sendTest() }
+                    Spacer()
+                    if locked {
+                        Text("Can't disconnect during a rule").foregroundStyle(.secondary)
+                    } else {
+                        Button("Disconnect") { accountability.disconnect() }
+                    }
+                }
+                .buttonStyle(.borderless)
+                Text("Message ({event} is replaced by what happened)").foregroundStyle(.secondary)
+                TextField(Accountability.defaultMessage, text: $accountability.message, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(locked)
+                if locked { Text("The message can't be changed during a rule.").foregroundStyle(.secondary) }
+            } else {
+                Text("Text someone over iMessage, from your account, if LocalControl is stopped or tampered with "
+                     + "during a rule. They'll get an introduction message now.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    TextField("Their phone number or iMessage email", text: $handle).textFieldStyle(.roundedBorder)
+                    Button("Connect") {
+                        do {
+                            try accountability.connect(partner: handle.trimmingCharacters(in: .whitespaces))
+                            handle = ""
+                            error = nil
+                        } catch {
+                            self.error = error.localizedDescription
+                        }
+                    }
+                    .disabled(handle.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            if let e = error ?? accountability.lastError { Text(e).foregroundStyle(.orange) }
+        }
+        .font(.caption)
     }
 }
 

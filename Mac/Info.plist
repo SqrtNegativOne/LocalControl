@@ -12,6 +12,6 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>LocalControl reads your active browser tab to check it against your rule, and redirects tabs that don't fit. Nothing leaves your Mac.</string>
+    <string>LocalControl reads your active browser tab to check it against your rule and redirects tabs that don't fit. If you set an accountability partner, it texts them through Messages when it's stopped or tampered with.</string>
 </dict>
 </plist>

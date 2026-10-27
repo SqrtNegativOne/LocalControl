@@ -10,6 +10,8 @@ struct LocalControlApp: App {
             MenuView()
                 .environmentObject(delegate.engine)
                 .environmentObject(delegate.sync)
+                .environmentObject(delegate.filter)
+                .environmentObject(delegate.accountability)
         } label: {
             MenuLabel().environmentObject(delegate.sync)
         }
@@ -37,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     let sync = CloudSync()
     lazy var engine = Engine(sync: sync)
+    let filter = FilterClient()
+    let accountability = Accountability()
+    private var watchdog: Watchdog?
+    private var termSignal: DispatchSourceSignal?
     private var server: BlockServer?
     private var window: NSWindow?
 
@@ -72,9 +78,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if userJustOpened { showWindow() }
         if !Probe.accessibilityTrusted { Probe.requestAccessibility() }
+        let watchdog = Watchdog(sync: sync, filter: filter, accountability: accountability) { [weak self] message in
+            self?.engine.recordAlert(message, partnerTold: self?.accountability.isConfigured == true)
+        }
+        watchdog.launched()
+        self.watchdog = watchdog
+        engine.watchdog = watchdog
+        catchTermination()
+        engine.filter = filter
+        filter.judge = { [weak self] host, app in await self?.engine.judgeHost(host, app: app) ?? false }
+        filter.start()
         engine.start()
         server = BlockServer(engine: engine)
         server?.start()
+    }
+
+    /// `kill` and `launchctl bootout` send SIGTERM, which would skip applicationShouldTerminate. During a
+    /// rule, ignore it and tell the partner; launchd then force-kills the app after its exit timeout.
+    private func catchTermination() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { exit(0) }
+                guard self.sync.activeRule != nil else {
+                    self.engine.saveUsage()
+                    self.watchdog?.quitting()
+                    exit(0)
+                }
+                self.watchdog?.report("Something tried to stop LocalControl from the command line during a rule.")
+            }
+        }
+        source.resume()
+        termSignal = source
     }
 
     /// Registers the keep-alive agent; returns true if this user-launched copy should exit.
@@ -97,7 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showWindow() {
         if window == nil {
-            let host = NSHostingController(rootView: MenuView().environmentObject(engine).environmentObject(sync))
+            let host = NSHostingController(rootView: MenuView().environmentObject(engine).environmentObject(sync)
+                .environmentObject(filter).environmentObject(accountability))
             let w = NSWindow(contentViewController: host)
             w.title = "LocalControl"
             w.styleMask = [.titled, .closable, .miniaturizable]
@@ -119,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if sync.activeRule != nil { return .terminateCancel }
         engine.saveUsage()
+        watchdog?.quitting()
         return .terminateNow
     }
 

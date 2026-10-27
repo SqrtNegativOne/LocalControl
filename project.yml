@@ -27,6 +27,8 @@ targets:
     sources:
       - Mac
       - Shared
+    dependencies:
+      - target: LocalControlFilter
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.eugenevinitsky.localcontrol
@@ -44,6 +46,43 @@ targets:
       path: Mac/Mac.entitlements
       properties:
         com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)com.eugenevinitsky.localcontrol
+        com.apple.developer.system-extension.install: true
+        com.apple.developer.networking.networkextension: [content-filter-provider]
+        com.apple.security.application-groups: [$(TeamIdentifierPrefix)com.eugenevinitsky.localcontrol]
+
+  # Network content filter (system extension), embedded in the Mac app.
+  LocalControlFilter:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Filter
+      - path: Shared/FilterAPI.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.eugenevinitsky.localcontrol.filter
+        # macOS requires the bundle to be named after its identifier.
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
+        PRODUCT_MODULE_NAME: LocalControlFilter
+        ENABLE_HARDENED_RUNTIME: YES
+    info:
+      path: Filter/Info.plist
+      properties:
+        CFBundleDisplayName: LocalControl Filter
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundlePackageType: SYSX
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSSystemExtensionUsageDescription: Blocks websites that don't fit your rule, in every app and browser.
+        NetworkExtension:
+          NEMachServiceName: $(TeamIdentifierPrefix)com.eugenevinitsky.localcontrol.filter
+          NEProviderClasses:
+            com.apple.networkextension.filter-data: $(PRODUCT_MODULE_NAME).FilterProvider
+    entitlements:
+      path: Filter/Filter.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [content-filter-provider]
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [$(TeamIdentifierPrefix)com.eugenevinitsky.localcontrol]
 
   LocalControlPhone:
     type: application
