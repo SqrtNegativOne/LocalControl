@@ -30,7 +30,7 @@ private struct MenuLabel: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static let agentLabel = "com.eugenevinitsky.localcontrol.agent"
     /// Posted by a user-launched copy so the running agent copy shows its window.
     static let showNotification = Notification.Name("com.eugenevinitsky.localcontrol.show")
@@ -103,10 +103,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.styleMask = [.titled, .closable, .miniaturizable]
             w.isReleasedWhenClosed = false
             w.center()
+            w.delegate = self
             window = w
         }
+        // Menu-bar only by default; a Dock icon and ⌘Tab entry while the window is open.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
