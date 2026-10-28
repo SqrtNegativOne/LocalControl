@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import subprocess
 import threading
 import time
 import traceback
@@ -12,18 +11,23 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 
-from . import macos, service
+from . import desktop
+from .desktop import Activity
 from .history import PromptHistory
 from .config import DATA_DIR, Config
-from .llm import LLMError, Ollama
-from .macos import Activity
+from .llm import LLMError, make as make_llm
 
 # Apps that are part of the OS plumbing and never worth judging.
 SYSTEM_APPS = {
+    # macOS
     "Finder", "loginwindow", "Dock", "SystemUIServer", "System Settings", "System Preferences",
     "Spotlight", "Control Center", "Notification Center", "NotificationCenter", "ScreenSaverEngine",
     "SecurityAgent", "UserNotificationCenter", "coreautha", "universalAccessAuthWarn",
     "Raycast", "Alfred",
+    # Windows
+    "explorer", "LockApp", "SearchHost", "StartMenuExperienceHost", "ShellExperienceHost",
+    "ApplicationFrameHost", "TextInputHost", "Taskmgr", "conhost", "dwm", "Idle",
+    "LocalControl",
 }
 BLANK_URL_PREFIXES = (
     "chrome://newtab", "about:blank", "about:newtab", "about:home", "edge://newtab",
@@ -157,7 +161,8 @@ class Usage:
 class Controller:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.llm = Ollama(cfg.ollama_url, cfg.model)
+        self.llm = make_llm(cfg)
+        self.vision_supported = self.llm.vision()  # None when the server won't say
         self.lock = threading.RLock()
         self.policy: Policy | None = None
         self.cache: dict[str, Verdict] = {}
@@ -267,6 +272,8 @@ class Controller:
         return None
 
     def _wants_screenshot(self, act: Activity) -> bool:
+        if self.cfg.vision == "off" or self.vision_supported is False:
+            return False  # this model can't see, so an image would just error out
         if self.cfg.vision == "always":
             return True
         if self.cfg.vision == "auto":
@@ -289,7 +296,7 @@ class Controller:
                       "Take the explanation into account if it is plausible and consistent with the rule."]
         images = []
         if self._wants_screenshot(act):
-            shot = macos.screenshot(DATA_DIR / "screen.jpg")
+            shot = desktop.screenshot(DATA_DIR / "screen.jpg")
             if shot:
                 images.append(shot)
                 lines += ["", "A screenshot of the screen is attached."]
@@ -321,7 +328,7 @@ class Controller:
             # Fail closed: otherwise killing Ollama would be an easy way out of a rule.
             # Not cached, so things recover as soon as the model is back.
             self.last_error = str(e)
-            self._revive_ollama()
+            self._revive_model()
             return Verdict(False, "The local model is unavailable, so unjudged activity is blocked until it's back.",
                            source="error")
         with self.lock:
@@ -330,13 +337,12 @@ class Controller:
         self._log("judge", activity=act.to_dict(), allowed=v.allowed, reason=v.reason, scope=v.scope)
         return v
 
-    def _revive_ollama(self):
+    def _revive_model(self):
         if time.time() - self._last_revive < 30:
             return
         self._last_revive = time.time()
         try:
-            subprocess.Popen(["/opt/homebrew/bin/brew", "services", "start", "ollama"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.llm.revive()
         except OSError:
             pass
 
@@ -364,7 +370,7 @@ class Controller:
         if self.cfg.dry_run:
             return
         policy = self.policy
-        if act.browser and (act.url or act.browser == "firefox"):
+        if act.browser and (act.url or act.browser == "firefox" or desktop.CAN_REDIRECT_WITHOUT_URL):
             block_id = uuid.uuid4().hex[:8]
             self.blocks[block_id] = {"url": act.url, "title": act.tab_title, "reason": v.reason,
                                      "rule": policy.rule if policy else ""}
@@ -372,18 +378,18 @@ class Controller:
                 self.blocks.pop(next(iter(self.blocks)))
             target = f"{self.cfg.base_url}/blocked?id={block_id}"
             try:
-                macos.redirect_tab(act, target)
+                desktop.redirect_tab(act, target)
             except OSError as e:
                 self.last_error = f"Could not redirect tab: {e}"
         else:
             try:
-                macos.hide_app(act)
+                desktop.hide_app(act)
             except OSError as e:
                 self.last_error = f"Could not hide {act.app}: {e}"
             key = cache_keys(act)[1]
             if time.time() - self._notified.get(key, 0) > 30:
                 self._notified[key] = time.time()
-                macos.notify(f"LocalControl blocked {act.app}", v.reason)
+                desktop.notify(f"LocalControl blocked {act.app}", v.reason)
 
     # ---------- main loop ----------
 
@@ -410,19 +416,19 @@ class Controller:
             if self.policy:
                 self._save_policy()
         if os.environ.get("LOCALCONTROL_SERVICE"):
-            service.ensure_guard()
+            desktop.ensure_guard()
 
     def _tick(self, dt: float):
         with self.lock:
             if self.policy and self.policy.expired():
-                macos.notify("LocalControl", f"Session over: {self.policy.command}")
+                desktop.notify("LocalControl", f"Session over: {self.policy.command}")
                 self.clear_policy("expired")
         try:
-            act = macos.observe()
+            act = desktop.observe()
         except Exception as e:
-            self.last_error = f"Cannot read frontmost app (grant Accessibility/Automation?): {e}"
+            self.last_error = f"Cannot read the frontmost window: {e}"
             return
-        if macos.idle_seconds() < self.cfg.idle_seconds:
+        if desktop.idle_seconds() < self.cfg.idle_seconds:
             self.usage.add(act, dt)
         v = self.evaluate(act)
         with self.lock:

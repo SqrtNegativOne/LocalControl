@@ -1,60 +1,11 @@
 """Observing and acting on the macOS desktop via AppleScript and command-line tools."""
 
 import re
+import shutil
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
-# Browsers whose active tab URL we can read/set through AppleScript, by dialect.
-BROWSERS = {
-    "Google Chrome": "chrome",
-    "Google Chrome Canary": "chrome",
-    "Chromium": "chrome",
-    "Brave Browser": "chrome",
-    "Microsoft Edge": "chrome",
-    "Vivaldi": "chrome",
-    "Arc": "chrome",
-    "Safari": "safari",
-    "Safari Technology Preview": "safari",
-    # Firefox has no AppleScript tab API: we only get the window title (and screenshots).
-    "Firefox": "firefox",
-    "Firefox Developer Edition": "firefox",
-}
-
-
-@dataclass
-class Activity:
-    app: str
-    window_title: str = ""
-    process: str = ""  # System Events process name; can differ from the app name (e.g. "firefox")
-    url: str = ""
-    tab_title: str = ""
-
-    @property
-    def browser(self) -> str | None:
-        return BROWSERS.get(self.app)
-
-    @property
-    def domain(self) -> str:
-        host = urlsplit(self.url).hostname or ""
-        return host.removeprefix("www.")
-
-    @property
-    def page(self) -> str:
-        """URL without fragment, used as a cache key."""
-        p = urlsplit(self.url)
-        return urlunsplit((p.scheme, p.netloc, p.path, p.query, ""))
-
-    @property
-    def label(self) -> str:
-        if self.browser and self.url:
-            return f"{self.domain} — {self.tab_title or self.url}"
-        return f"{self.app} — {self.window_title}" if self.window_title else self.app
-
-    def to_dict(self) -> dict:
-        return {"app": self.app, "window_title": self.window_title, "url": self.url,
-                "tab_title": self.tab_title, "domain": self.domain, "label": self.label}
+from .activity import BROWSERS, Activity, strip_window_suffix  # noqa: F401  (re-exported)
 
 
 def osascript(script: str, timeout: float = 4.0) -> str:
@@ -141,7 +92,7 @@ def observe() -> Activity:
         except OSError:
             pass  # Automation permission not granted yet, or the browser is busy.
     elif dialect == "firefox":
-        act.tab_title = re.sub(r"\s+[—-]\s+Mozilla Firefox.*$", "", win)
+        act.tab_title = strip_window_suffix(win)
         act.url = _ax_url(pid)
     return act
 
@@ -208,3 +159,10 @@ def idle_seconds() -> float:
         return int(m.group(1)) / 1e9 if m else 0.0
     except (OSError, subprocess.TimeoutExpired):
         return 0.0
+
+
+def revive_ollama() -> None:
+    """Start Ollama again if the model server went away (fail-closed relies on it)."""
+    brew = shutil.which("brew") or "/opt/homebrew/bin/brew"
+    subprocess.Popen([brew, "services", "start", "ollama"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

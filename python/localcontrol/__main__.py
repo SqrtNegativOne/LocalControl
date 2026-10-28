@@ -5,13 +5,16 @@
     python -m localcontrol history [N]  # list saved prompts / reuse prompt N
     python -m localcontrol status
     python -m localcontrol stop        # only once the rule has expired
-    python -m localcontrol install     # run at login under launchd, with a watchdog
+    python -m localcontrol install     # run at login under launchd / Task Scheduler, with a watchdog
+    python -m localcontrol guard       # the Windows watchdog loop (installed for you)
 """
 
 import argparse
 import json
+import os
 import sys
 import threading
+import traceback
 import urllib.error
 import urllib.request
 import webbrowser
@@ -60,12 +63,16 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the monitor and dashboard")
+    s.add_argument("--backend", choices=["auto", "ollama", "llama"], default=Config.backend,
+                   help="which local model server to use (llama = llama.app)")
     s.add_argument("--model", default=Config.model)
     s.add_argument("--ollama-url", default=Config.ollama_url)
+    s.add_argument("--llama-url", default=Config.llama_url)
     s.add_argument("--vision", choices=["off", "auto", "always"], default=Config.vision)
     s.add_argument("--poll", type=float, default=Config.poll_seconds, help="seconds between checks")
     s.add_argument("--dry-run", action="store_true", help="judge and log, but don't block anything")
     s.add_argument("--no-open", action="store_true", help="don't open the dashboard in a browser")
+    s.add_argument("--service", action="store_true", help="run as the installed background task")
 
     c = sub.add_parser("cmd", help="set a usage rule")
     c.add_argument("text", nargs="+")
@@ -74,8 +81,9 @@ def main():
     h = sub.add_parser("history", help="list saved prompts, most used first")
     h.add_argument("n", nargs="?", type=int, help="reuse prompt number N")
 
-    sub.add_parser("install", help="run at login under launchd, with a watchdog")
-    sub.add_parser("uninstall", help="remove the launchd service (refused while a rule is active)")
+    sub.add_parser("install", help="run at login (launchd or Task Scheduler), with a watchdog")
+    sub.add_parser("uninstall", help="remove the background service (refused while a rule is active)")
+    sub.add_parser("guard", help="watchdog loop that keeps the installed task alive")
     sub.add_parser("status", help="show the active rule and current verdict")
     sub.add_parser("stop", help="end the active rule")
 
@@ -85,22 +93,34 @@ def main():
         from .controller import Controller
         from .server import make_server
 
+        if a.service:
+            os.environ["LOCALCONTROL_SERVICE"] = "1"
         cfg = Config(port=a.port, model=a.model, ollama_url=a.ollama_url, vision=a.vision,
-                     poll_seconds=a.poll, dry_run=a.dry_run)
-        ctl = Controller(cfg)
-        ok, msg = ctl.llm.status()
-        print(f"[localcontrol] model: {msg}")
-        httpd = make_server(ctl)
-        threading.Thread(target=ctl.run, daemon=True).start()
-        print(f"[localcontrol] dashboard: {cfg.base_url}" + ("  (dry run)" if cfg.dry_run else ""))
-        if not a.no_open:
-            webbrowser.open(cfg.base_url)
+                     poll_seconds=a.poll, dry_run=a.dry_run,
+                     backend=a.backend, llama_url=a.llama_url)
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            ctl.stop()
+            ctl = Controller(cfg)
+            ok, msg = ctl.llm.status()
+            print(f"[localcontrol] model: {msg}")
+            httpd = make_server(ctl)
+            threading.Thread(target=ctl.run, daemon=True).start()
+            print(f"[localcontrol] dashboard: {cfg.base_url}" + ("  (dry run)" if cfg.dry_run else ""))
+            if not a.no_open:
+                webbrowser.open(cfg.base_url)
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                ctl.stop()
+        except Exception:
+            # Under pythonw there is no console, so leave a trail for the user.
+            from .config import DATA_DIR
+
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with open(DATA_DIR / "server.log", "a", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+            raise
     elif a.cmd == "cmd":
         r = _api(a.port, "/api/command", {"text": " ".join(a.text), "minutes": a.minutes})
         p = r["policy"]
@@ -134,17 +154,27 @@ def main():
         else:
             sys.exit(f"No prompt #{a.n}")
     elif a.cmd == "install":
-        from . import service
+        from .desktop import PLATFORM, install
 
-        service.install(a.port)
-        print(f"Installed. LocalControl now runs at login and restarts if killed. Dashboard: http://127.0.0.1:{a.port}")
+        install(a.port)
+        print(f"Installed ({PLATFORM}). LocalControl now runs at login and restarts if killed. "
+              f"Dashboard: http://127.0.0.1:{a.port}")
     elif a.cmd == "uninstall":
-        from . import service
+        from .desktop import uninstall
 
         if _active_rule(a.port):
             sys.exit("A rule is active; uninstall is refused until it ends (see: localcontrol status).")
-        service.uninstall()
+        uninstall()
         print("Uninstalled.")
+    elif a.cmd == "guard":
+        from .desktop import PLATFORM
+
+        if PLATFORM != "windows":
+            sys.exit("guard is a Windows-only loop; macOS gets one from launchd.")
+        from .winservice import guard_loop
+
+        print("Guard running.")
+        guard_loop()
     elif a.cmd == "stop":
         _api(a.port, "/api/stop", {})
         print("Rule cleared.")
