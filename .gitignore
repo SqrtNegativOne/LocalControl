@@ -1,9 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
-.build/
-.build-mac/
-LocalControl.xcodeproj/
-.team
-.DS_Store
-xcuserdata/
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
