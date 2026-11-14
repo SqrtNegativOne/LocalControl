@@ -10,20 +10,29 @@ import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 
 from . import desktop
-from .config import DATA_DIR, Config
+from .config import DATA_DIR, Config, atomic_write_text
 from .desktop import Activity
 from .history import PromptHistory
 from .llm import LLMError
 from .llm import make as make_llm
 
 # Apps that are part of the OS plumbing and never worth judging.
+# Taskmgr is deliberately not here: Task Manager would be an easy way to kill
+# the monitor while a rule is running, so it is judged like any other app.
 SYSTEM_APPS = {
     "explorer", "LockApp", "SearchHost", "StartMenuExperienceHost", "ShellExperienceHost",
-    "ApplicationFrameHost", "TextInputHost", "Taskmgr", "conhost", "dwm", "Idle",
+    "ApplicationFrameHost", "TextInputHost", "conhost", "dwm", "Idle",
     "LocalControl",
 }
+# events.jsonl is rewritten down to its newest lines once it passes this size.
+EVENTS_MAX_BYTES = 1_000_000
+EVENTS_KEEP_LINES = 200
+# Daily usage files older than this are pruned.
+USAGE_KEEP_DAYS = 90
+
 BLANK_URL_PREFIXES = (
     "chrome://newtab", "about:blank", "about:newtab", "about:home", "edge://newtab",
     "brave://newtab", "favorites://", "arc://", "chrome-search://",
@@ -100,6 +109,39 @@ def cache_keys(act: Activity) -> tuple[str, str]:
     return f"app:{act.app}", f"win:{act.app}|{act.window_title}"
 
 
+def block_activity(entry: dict | None) -> Activity | None:
+    """The activity a block page entry was made from, for replaying an appeal.
+
+    `enforce()` stores this alongside the block so `appeal()` can rebuild the
+    original cache keys even when the posted url/title can't identify it
+    (Firefox tabs have no URL, and "Google Chrome" isn't a known browser).
+    """
+    if not entry or not entry.get("activity"):
+        return None
+    a = entry["activity"]
+    if not isinstance(a, dict) or not a.get("app"):
+        return None
+    return Activity(app=str(a["app"]), url=str(a.get("url") or ""),
+                    tab_title=str(a.get("tab_title") or ""),
+                    window_title=str(a.get("window_title") or ""))
+
+
+def appeal_activity(blocks: dict[str, dict], url: str, title: str,
+                    block_id: str | None = None) -> Activity:
+    """The activity an appeal is about, so its override key can match `evaluate()`.
+
+    Prefer the activity persisted with the block (identified by `block_id`, or
+    matched by the url/title the block page posts when the page predates
+    block_id). Fall back to a chrome-shaped guess for older block pages.
+    """
+    entry = blocks.get(block_id) if block_id else None
+    if entry is None:
+        entry = next((e for e in reversed(list(blocks.values()))
+                      if (e.get("url") or "") == (url or "")
+                      and (e.get("title") or "") == (title or "")), None)
+    return block_activity(entry) or Activity(app="Google Chrome", url=url, tab_title=title)
+
+
 def fallback_minutes(text: str) -> float:
     t = text.lower()
     if re.search(r"\bhalf an? hour\b", t):
@@ -116,15 +158,17 @@ def fallback_minutes(text: str) -> float:
 class Usage:
     """Seconds of active (non-idle) time per app and per website, per day."""
 
-    def __init__(self):
+    def __init__(self, data_dir: Path | None = None):
+        self.data_dir = data_dir or DATA_DIR
         self.day = date.today().isoformat()
         self.apps: dict[str, float] = {}
         self.sites: dict[str, float] = {}
         self._load()
+        self._prune()
 
     @property
     def path(self):
-        return DATA_DIR / "usage" / f"{self.day}.json"
+        return self.data_dir / "usage" / f"{self.day}.json"
 
     def _load(self):
         try:
@@ -133,19 +177,35 @@ class Usage:
         except (OSError, ValueError, KeyError):
             self.apps, self.sites = {}, {}
 
+    def _prune(self):
+        """Delete daily usage files past the retention window (best effort)."""
+        cutoff = date.today()
+        try:
+            files = (self.data_dir / "usage").glob("*.json")
+            for path in files:
+                try:
+                    day = date.fromisoformat(path.stem)
+                except ValueError:
+                    continue
+                if (cutoff - day).days > USAGE_KEEP_DAYS:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            pass  # pruning is housekeeping; never fail a load over it
+
     def add(self, act: Activity, seconds: float):
         today = date.today().isoformat()
         if today != self.day:
             self.save()
             self.day = today
             self.apps, self.sites = {}, {}
+            self._prune()
         self.apps[act.app] = self.apps.get(act.app, 0) + seconds
         if act.domain:
             self.sites[act.domain] = self.sites.get(act.domain, 0) + seconds
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"apps": self.apps, "sites": self.sites}))
+        atomic_write_text(self.path, json.dumps({"apps": self.apps, "sites": self.sites}))
 
     def top(self, n: int = 10) -> dict:
         def srt(d):
@@ -154,8 +214,10 @@ class Usage:
 
 
 class Controller:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, data_dir: Path | None = None):
         self.cfg = cfg
+        # Runtime state defaults to %USERPROFILE%\\.localcontrol; eval_judge injects a temp dir.
+        self.data_dir = data_dir or DATA_DIR
         self.llm = make_llm(cfg)
         self.vision_supported = self.llm.vision()  # None when the server won't say
         self.lock = threading.RLock()
@@ -165,8 +227,8 @@ class Controller:
         self.current: Activity | None = None
         self.current_verdict: Verdict | None = None
         self.last_error: str | None = None
-        self.usage = Usage()
-        self.history = PromptHistory()
+        self.usage = Usage(self.data_dir)
+        self.history = PromptHistory(self.data_dir)
         self._notified: dict[str, float] = {}
         self.blocks: dict[str, dict] = {}  # id -> details shown on the block page
         self._last_revive = 0.0
@@ -177,25 +239,47 @@ class Controller:
 
     @property
     def _state_path(self):
-        return DATA_DIR / "state.json"
+        return self.data_dir / "state.json"
+
+    @property
+    def _state_backup_path(self):
+        return self.data_dir / "state.json.bak"
 
     def _load_policy(self):
-        try:
-            p = Policy(**json.loads(self._state_path.read_text())["policy"])
+        # Fall back to the backup if the live file vanished or got corrupted:
+        # otherwise deleting state.json would be an easy way out of a rule.
+        for path in (self._state_path, self._state_backup_path):
+            try:
+                p = Policy(**json.loads(path.read_text())["policy"])
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
             self.policy = None if p.expired() else p
-        except (OSError, ValueError, KeyError, TypeError):
-            self.policy = None
+            return
+        self.policy = None
 
     def _save_policy(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps({"policy": asdict(self.policy) if self.policy else None}))
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        text = json.dumps({"policy": asdict(self.policy) if self.policy else None})
+        atomic_write_text(self._state_path, text)
+        try:
+            atomic_write_text(self._state_backup_path, text)
+        except OSError:
+            pass  # the live file is already durable; a backup failure is not fatal
 
     def _log(self, event: str, **kw):
         entry = {"ts": time.time(), "event": event, **kw}
         self.decisions.appendleft(entry)
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(DATA_DIR / "events.jsonl", "a") as f:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        path = self.data_dir / "events.jsonl"
+        with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        try:
+            # Bound the log: size check only, so the common path stays one stat.
+            if os.path.getsize(path) > EVENTS_MAX_BYTES:
+                lines = path.read_text().splitlines(keepends=True)[-EVENTS_KEEP_LINES:]
+                atomic_write_text(path, "".join(lines))
+        except OSError:
+            pass  # a failed trim is not worth failing the event that was just logged
 
     # ---------- policy commands ----------
 
@@ -214,8 +298,12 @@ class Controller:
                 f"Current time: {now:%A %H:%M}.\nInstruction: {command}",
                 PARSE_SCHEMA,
             )
+            try:
+                minutes_raw = float(parsed.get("duration_minutes") or 0)
+            except (TypeError, ValueError) as e:  # non-numeric duration: treat like a failed parse
+                raise LLMError(f"Model returned a bad duration: {parsed.get('duration_minutes')!r}") from e
             rule = parsed.get("rule") or command
-            llm_minutes = float(parsed.get("duration_minutes") or 0)
+            llm_minutes = minutes_raw
         except LLMError as e:
             self.last_error = str(e)
             rule, llm_minutes = command, 0.0
@@ -278,6 +366,13 @@ class Controller:
         return False
 
     def _ask_llm(self, policy: Policy, act: Activity, justification: str = "") -> Verdict:
+        # Judge and appeals run concurrently, so each call gets its own file.
+        for old in self.data_dir.glob("screen*.jpg"):
+            try:
+                if time.time() - old.stat().st_mtime > 86400:
+                    old.unlink()
+            except OSError:
+                pass  # stale cleanup is best-effort
         lines = [f"RULE: {policy.rule}", f'(Original instruction: "{policy.command}")', "", "CURRENT ACTIVITY",
                  f"Application: {act.app}"]
         if act.url:
@@ -291,13 +386,34 @@ class Controller:
                       "Take the explanation into account if it is plausible and consistent with the rule."]
         images = []
         if self._wants_screenshot(act):
-            shot = desktop.screenshot(DATA_DIR / "screen.jpg")
+            # Unique per call so concurrent judgments can't overwrite each other.
+            shot = desktop.screenshot(self.data_dir / f"screen-{uuid.uuid4().hex[:8]}.jpg")
             if shot:
                 images.append(shot)
                 lines += ["", "A screenshot of the screen is attached."]
-        out = self.llm.chat_json(JUDGE_SYSTEM, "\n".join(lines), JUDGE_SCHEMA, images)
-        return Verdict(bool(out.get("allowed", True)), str(out.get("reason", "")),
-                       "site" if out.get("scope") == "site" else "page")
+        try:
+            out = self.llm.chat_json(JUDGE_SYSTEM, "\n".join(lines), JUDGE_SCHEMA, images)
+        finally:
+            # chat_json reads the image before returning, so it's safe to remove now.
+            for shot in images:
+                try:
+                    Path(shot).unlink()
+                except OSError:
+                    pass
+        return self._verdict(out)
+
+    @staticmethod
+    def _verdict(out) -> Verdict:
+        """Validate the model's answer; anything malformed fails closed (raises)."""
+        if not isinstance(out, dict) or not isinstance(out.get("allowed"), bool):
+            raise LLMError(f"Model response is missing a boolean 'allowed': {str(out)[:200]}")
+        reason = out.get("reason")
+        if not isinstance(reason, str):
+            raise LLMError(f"Model response is missing a string 'reason': {str(out)[:200]}")
+        scope = out.get("scope")
+        if scope not in ("site", "page"):
+            raise LLMError(f"Model response is missing a valid 'scope': {str(out)[:200]}")
+        return Verdict(out["allowed"], reason, scope)
 
     def evaluate(self, act: Activity) -> Verdict | None:
         """Verdict for an activity under the current policy, or None if no policy is active."""
@@ -341,12 +457,16 @@ class Controller:
         except OSError:
             pass
 
-    def appeal(self, url: str, title: str, justification: str) -> Verdict:
+    def appeal(self, url: str, title: str, justification: str,
+               block_id: str | None = None) -> Verdict:
         with self.lock:
             policy = self.policy
         if policy is None:
             return Verdict(True, "No active policy", source="builtin")
-        act = Activity(app="Google Chrome", url=url, tab_title=title)
+        # Rebuild the activity that was actually blocked, so the override key
+        # matches what evaluate() computes for it on the next tick.
+        with self.lock:
+            act = appeal_activity(self.blocks, url, title, block_id)
         try:
             v = self._ask_llm(policy, act, justification)
         except LLMError as e:
@@ -354,6 +474,8 @@ class Controller:
         v.source = "appeal"
         if v.allowed:
             with self.lock:
+                # evaluate() checks both keys of the live activity, so the page
+                # key must be computed from the same url/title as it sees.
                 policy.overrides[cache_keys(act)[1]] = justification
                 self._save_policy()
         self._log("appeal", url=url, justification=justification, allowed=v.allowed, reason=v.reason)
@@ -367,8 +489,13 @@ class Controller:
         policy = self.policy
         if act.browser and (act.url or act.browser == "firefox" or desktop.CAN_REDIRECT_WITHOUT_URL):
             block_id = uuid.uuid4().hex[:8]
-            self.blocks[block_id] = {"url": act.url, "title": act.tab_title, "reason": v.reason,
-                                     "rule": policy.rule if policy else ""}
+            self.blocks[block_id] = {
+                "url": act.url, "title": act.tab_title, "reason": v.reason,
+                "rule": policy.rule if policy else "",
+                # JSON-safe for /api/block; replayed by appeal() to rebuild the cache keys.
+                "activity": {"app": act.app, "url": act.url, "tab_title": act.tab_title,
+                             "window_title": act.window_title},
+            }
             while len(self.blocks) > 200:
                 self.blocks.pop(next(iter(self.blocks)))
             target = f"{self.cfg.base_url}/blocked?id={block_id}"
@@ -437,7 +564,12 @@ class Controller:
     # ---------- UI state ----------
 
     def snapshot(self) -> dict:
-        ok, status = self.llm.status()
+        # The dashboard polls this every 2 s: one odd backend response must
+        # degrade to a status message, not kill the request.
+        try:
+            ok, status = self.llm.status()
+        except Exception as e:  # noqa: BLE001 - backstop; llm.status already converts LLMError
+            ok, status = False, f"Cannot query the model server: {type(e).__name__}"
         with self.lock:
             p = self.policy
             return {

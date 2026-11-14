@@ -113,6 +113,12 @@ class VARIANT(ctypes.Structure):
                 ("val", ctypes.c_longlong), ("pad", ctypes.c_ubyte * 8)]
 
 
+if ctypes.sizeof(ctypes.c_void_p) != 8 or ctypes.sizeof(VARIANT) != 24:
+    raise RuntimeError(
+        "LocalControl requires 64-bit Python: the Win32 COM/INPUT bindings assume x64."
+    )
+
+
 def _guid(text: str) -> GUID:
     g = GUID()
     ole32.CLSIDFromString(text, ctypes.byref(g))
@@ -287,9 +293,16 @@ def _uia_tab(hwnd: int) -> tuple[str, str]:
         if not root:
             return "", ""
         try:
-            edits = [(auto.name(e), auto.value(e)) for e in auto.edits(root)]
+            elems = auto.edits(root)  # raw element pointers: we own releasing them
         finally:
             _release(root)
+        edits = []
+        try:
+            for e in elems:
+                edits.append((auto.name(e), auto.value(e)))
+        finally:
+            for e in elems:
+                _release(e)
     except (OSError, ctypes.ArgumentError):
         return "", ""
     for name, value in edits:
@@ -320,6 +333,11 @@ class _Msaa:
             ctypes.byref(acc))
         return _Msaa(acc) if (hr >= 0 and acc) else None
 
+    def close(self) -> None:
+        """Release the root IAccessible (the caller's job, once traversal is done)."""
+        _release(self.ptr)
+        self.ptr = None
+
     @staticmethod
     def _string(node, index: int, child: int) -> str:
         out = ctypes.c_wchar_p()
@@ -345,6 +363,12 @@ class _Msaa:
         return int(out.val) & 0xFFFFFFFF
 
     def children(self, node) -> list:
+        """[(node, child_id), ...] for `node`'s children.
+
+        VT_DISPATCH entries are fresh COM pointers the *caller* must _release
+        exactly once (they are not aliases of `node`); plain child ids just
+        reference `node` itself and must not be released.
+        """
         n = ctypes.c_long()
         if _call(node, 8, ctypes.POINTER(ctypes.c_long))(node, ctypes.byref(n)) < 0 or n.value <= 0:
             return []
@@ -365,27 +389,54 @@ class _Msaa:
 
 def _msaa_tab(hwnd: int) -> tuple[str, str]:
     """(url, tab title) from the accessible document, matched to the window title."""
+    documents: list[tuple[str, str]] = []
+    title = ""
     try:
         acc = _Msaa.open(hwnd)
         if acc is None:
             return "", ""
         title = _window_text(hwnd)
-        queue = [(acc.ptr, 0, 0)]
-        documents = []
+        # Queue entries: (node, child_id, depth, is_dispatch). A VT_DISPATCH node
+        # is a fresh COM pointer we own and release exactly once, right after
+        # dequeuing it (its child_id is always 1, the default child). The root
+        # IAccessible aliases acc.ptr and is released only by acc.close(); its
+        # children arrive as plain child ids (small integers, never released).
+        queue: list[tuple[object, int, int, bool]] = [(acc.ptr, 0, 0, False)]
         visited = 0
-        while queue and visited < 250:
-            node, child, depth = queue.pop(0)
-            if depth:
-                visited += 1
-                if acc.role(child, node) == ROLE_SYSTEM_DOCUMENT:
-                    # Only documents carry the URL; skip their (huge) subtrees.
-                    url = as_url(acc.value(child, node))
-                    if url:
-                        documents.append((acc.name(child, node), url))
-                    continue
-            if depth >= 6:
-                continue
-            queue.extend((pv, c, depth + 1) for pv, c in acc.children(node))
+        try:
+            while queue and visited < 250:
+                node, child, depth, is_dispatch = queue.pop(0)
+                try:
+                    if is_dispatch:
+                        if not node:
+                            continue  # empty dispatch: nothing to read or expand
+                        visited += 1
+                        if acc.role(1, node) == ROLE_SYSTEM_DOCUMENT:
+                            # Only documents carry the URL; skip their (huge) subtrees.
+                            url = as_url(acc.value(1, node))
+                            if url:
+                                documents.append((acc.name(1, node), url))
+                            continue
+                    elif child:  # a plain child id of the root, not depth 0
+                        visited += 1
+                        if acc.role(child, node) == ROLE_SYSTEM_DOCUMENT:
+                            # Only documents carry the URL; skip their (huge) subtrees.
+                            url = as_url(acc.value(child, node))
+                            if url:
+                                documents.append((acc.name(child, node), url))
+                            continue
+                    if depth >= 6:
+                        continue
+                    for pv, c in acc.children(node):
+                        if pv is node:  # a child id of this very node: never a dispatch
+                            queue.append((node, c, depth + 1, False))
+                        else:  # VT_DISPATCH: a fresh pointer, released once when dequeued
+                            queue.append((pv, c, depth + 1, True))
+                finally:
+                    if is_dispatch:
+                        _release(node)  # exactly once, even if a property call raised
+        finally:
+            acc.close()  # the root, exactly once
     except (OSError, ctypes.ArgumentError):
         return "", ""
 
@@ -490,15 +541,28 @@ def redirect_tab(act: Activity, target: str) -> bool:
     """Type `target` into the address bar of the window we last saw.
 
     Deliberately a no-op unless that window is still in the foreground: we will
-    not send keystrokes into whatever the user switched to.
+    not send keystrokes into whatever the user switched to. Focus is re-checked
+    immediately before each step; if the user switches mid-sequence we abandon
+    (typing nothing more), releasing any key still held. A URL typed just before
+    the switch stays in the address bar — that's harmless; typing Enter into
+    another app would not be.
     """
     hwnd = act.hwnd or _main_window(act.pid)
     if not hwnd or not u32.IsWindow(hwnd) or u32.GetForegroundWindow() != hwnd:
         return False
-    _send([(VK_CONTROL, 0, 0), (VK_L, 0, 0), (VK_L, 0, KEYEVENTF_KEYUP), (VK_CONTROL, 0, KEYEVENTF_KEYUP)])
+    _send([(VK_CONTROL, 0, 0), (VK_L, 0, 0)])
     time.sleep(0.05)
+    if u32.GetForegroundWindow() != hwnd:  # mid-chord: lift Ctrl/L before abandoning
+        _send([(VK_L, 0, KEYEVENTF_KEYUP), (VK_CONTROL, 0, KEYEVENTF_KEYUP)])
+        return False
+    _send([(VK_L, 0, KEYEVENTF_KEYUP), (VK_CONTROL, 0, KEYEVENTF_KEYUP)])
+    time.sleep(0.05)
+    if u32.GetForegroundWindow() != hwnd:  # address bar focused, URL not typed
+        return False
     _type_unicode(target)
     time.sleep(0.05)
+    if u32.GetForegroundWindow() != hwnd:  # half-filled address bar beats Enter elsewhere
+        return False
     _send([(VK_RETURN, 0, 0), (VK_RETURN, 0, KEYEVENTF_KEYUP)])
     with _TAB_LOCK:
         _TAB_CACHE.pop(hwnd, None)  # the page is about to change

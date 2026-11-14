@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -37,8 +38,6 @@ def _api(port: int, path: str, body: dict | None = None) -> dict:
 
 def _active_rule(port: int) -> bool:
     """Ask the running server; fall back to the saved state if it's not reachable."""
-    import time
-
     from .config import DATA_DIR
 
     try:
@@ -48,7 +47,10 @@ def _active_rule(port: int) -> bool:
         pass
     try:
         p = json.loads((DATA_DIR / "state.json").read_text())["policy"]
-        return p is not None and p["expires_at"] > time.time()
+        if p is None:
+            return False
+        # A legacy unbounded policy (expires_at is None) is still active.
+        return p["expires_at"] is None or p["expires_at"] > time.time()
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
@@ -143,7 +145,7 @@ def main():
     elif a.cmd == "cmd":
         r = _api(a.port, "/api/command", {"text": " ".join(a.text), "minutes": a.minutes})
         p = r["policy"]
-        left = None if p["expires_at"] is None else p["expires_at"] - p["started_at"]
+        left = None if p["expires_at"] is None else max(0.0, p["expires_at"] - time.time())
         print(f"Rule set ({_fmt_minutes(left)}):\n  {p['rule']}")
     elif a.cmd == "status":
         st = _api(a.port, "/api/state")

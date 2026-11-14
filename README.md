@@ -23,9 +23,15 @@ Chromium browsers are read through UI Automation. Firefox exposes its page URL t
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.10+
+- Python 3.10+ (64-bit Python is required — the Win32 COM/INPUT bindings assume x64.)
 - [uv](https://docs.astral.sh/uv/)
 - A local model server: Ollama or llama.app
+
+LocalControl screenshots the screen when the model needs an image to judge a
+window (only with `--vision auto/always`, and only for the local model request).
+Each capture is written to a unique `%USERPROFILE%\.localcontrol\screen-*.jpg`,
+sent only to the local model server, and deleted as soon as the judgment
+returns; any left behind by a crash are pruned after a day.
 
 ## Quick start
 
@@ -58,7 +64,7 @@ uv run localcontrol uninstall      # refused while a rule is active
 `install` creates two per-user Task Scheduler tasks:
 
 - `LocalControl\Agent` runs the monitor and is restarted by Windows if it dies.
-- `LocalControl\Guard` re-creates and re-runs the agent if its task is deleted or stopped.
+- `LocalControl\Guard` re-creates and re-runs the agent if its task is deleted, stopped, or disabled.
 
 The monitor also re-creates the guard. Pristine XML copies live in `%USERPROFILE%\.localcontrol\tasks`, so deleted tasks are restored.
 

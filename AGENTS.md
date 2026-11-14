@@ -15,6 +15,7 @@ Apple platform code back.
 ```text
 pyproject.toml
 eval_judge.py          # offline check of the judge prompt on canned activities
+tests/                 # stdlib unittest suite for the pure and platform-neutral pieces
 localcontrol/
   __main__.py          # CLI: serve, cmd, history, status, stop, install, uninstall, guard
   controller.py        # policy state, judgments, enforcement, usage, main loop
@@ -33,8 +34,9 @@ ships it as package data.
 ## Tooling
 
 - Use `uv`, not `pip`. Run commands from the repo root.
+- Tests: `uv run python -m unittest discover -s tests -t .`
 - Lint: `uvx ruff check .`
-- Compile check: `uv run python -m py_compile localcontrol/*.py eval_judge.py`
+- Compile check: `uv run python -m compileall -q localcontrol eval_judge.py`
 - Help/smoke test: `uv run localcontrol --help`
 - Desktop probe (foreground app, browser URL, screenshot): `uv run python -m localcontrol.windows`
 - Judge evaluation: `uv run python eval_judge.py`

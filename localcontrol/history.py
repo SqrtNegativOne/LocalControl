@@ -3,8 +3,9 @@
 import json
 import threading
 import time
+from pathlib import Path
 
-from .config import DATA_DIR
+from .config import DATA_DIR, atomic_write_text
 
 
 def _key(text: str) -> str:
@@ -12,8 +13,9 @@ def _key(text: str) -> str:
 
 
 class PromptHistory:
-    def __init__(self):
-        self.path = DATA_DIR / "prompts.json"
+    def __init__(self, data_dir: Path | None = None):
+        # Injectable so tests and eval_judge never read or write the real one.
+        self.path = (data_dir or DATA_DIR) / "prompts.json"
         self.lock = threading.Lock()
         try:
             self.items: list[dict] = json.loads(self.path.read_text())
@@ -22,7 +24,7 @@ class PromptHistory:
 
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.items, indent=1))
+        atomic_write_text(self.path, json.dumps(self.items, indent=1))
 
     def record(self, text: str, minutes: float):
         with self.lock:

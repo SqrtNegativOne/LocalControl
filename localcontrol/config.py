@@ -5,6 +5,22 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("LOCALCONTROL_HOME") or Path.home() / ".localcontrol")
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text so a crash mid-write never truncates the real file.
+
+    Writes to a sibling temp file, then ``os.replace`` swaps it onto the
+    target (an atomic operation on Windows); a failed write removes the
+    temp file and leaves the original untouched.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 @dataclass
 class Config:
     port: int = 8765

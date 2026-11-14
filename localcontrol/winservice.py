@@ -2,9 +2,9 @@
 
 Two scheduled tasks keep each other alive:
   LocalControl\\Agent  runs the monitor (restarted by Windows if it dies)
-  LocalControl\\Guard  re-creates and re-runs the agent if its task is deleted or stopped
+  LocalControl\\Guard  re-creates and re-runs the agent if its task is deleted, stopped, or disabled
 and the monitor itself re-creates/re-runs the guard. Pristine XML copies live in
-~/.localcontrol/tasks/ so deleted tasks get restored.
+~/.localcontrol/tasks/ so deleted tasks get restored, and disabled tasks are re-enabled.
 """
 
 import csv
@@ -165,7 +165,15 @@ def install(port: int) -> None:
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     for task, (xml, _description) in _tasks(port).items():
         path = _backup(task)
-        path.write_text(xml, encoding="utf-16")  # Task Scheduler wants UTF-16 XML
+        # Atomic (a half-written backup would break restore) and UTF-16, the
+        # encoding Task Scheduler expects for /XML, regardless of locale.
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(xml, encoding="utf-16")
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         _schtasks("/End", "/TN", task)
         _create(task, path)
     _schtasks("/Run", "/TN", GUARD)
@@ -175,12 +183,36 @@ def installed() -> bool:
     return _backup(GUARD).exists()
 
 
+def _re_enable(task: str) -> str:
+    """Turn a disabled task back on; report its state afterwards.
+
+    ``schtasks /Run`` does nothing on a disabled task, so ``/Change /ENABLE``
+    comes first, then ``/Run`` if it is Ready but not already running.
+    """
+    _schtasks("/Change", "/TN", task, "/ENABLE")
+    state = status(task)
+    if state in ("Ready", "Queued"):
+        _schtasks("/Run", "/TN", task)
+        state = status(task)
+    return state
+
+
 def ensure_guard() -> None:
-    """Called periodically by the monitor when running as the service."""
+    """Called periodically by the monitor when running as the service.
+
+    A disabled guard task is treated as broken: re-enable it, then start it
+    if it is Ready but not running. Only a Running/Ready/Queued guard (or no
+    backup to restore from) short-circuits.
+    """
     if not installed():
         return
-    if status(GUARD):
+    state = status(GUARD)
+    if state == "Disabled":
+        _re_enable(GUARD)
         return
+    if state in ("Running", "Ready", "Queued"):
+        return
+    # "" means missing -> recreate from the backup.
     backup = _backup(GUARD)
     try:
         _create(GUARD, backup)
@@ -210,6 +242,10 @@ def guard_loop(poll: float = 5.0, log: Path | None = None) -> None:
                     _create(AGENT, backup)
                     note("agent task was missing; recreated")
                     _schtasks("/Run", "/TN", AGENT)
+            elif state == "Disabled":
+                _schtasks("/Change", "/TN", AGENT, "/ENABLE")
+                _schtasks("/Run", "/TN", AGENT)
+                note("agent task was disabled; re-enabled and started it")
             elif state != "Running":
                 _schtasks("/Run", "/TN", AGENT)
                 note(f"agent was {state}; started it")

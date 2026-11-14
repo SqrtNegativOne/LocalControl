@@ -47,6 +47,8 @@
 <script>
 const id = new URLSearchParams(location.search).get("id");
 let url = "", title = "";
+// The appeal posts block_id so the override is keyed to the activity that
+// was actually blocked; url/title stay for older block pages.
 fetch(`/api/block?id=${encodeURIComponent(id)}`).then((r) => r.json()).then((b) => {
   url = b.url || ""; title = b.title || "";
   document.getElementById("url").textContent = title ? `${title} — ${url}` : url;
@@ -60,7 +62,7 @@ document.getElementById("appeal").onclick = async () => {
   btn.disabled = true; res.textContent = "Asking the local model…"; res.style.color = "";
   try {
     const r = await (await fetch("/api/appeal", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({url, title, justification: why})})).json();
+      body: JSON.stringify({url, title, justification: why, block_id: id})})).json();
     res.textContent = r.reason; res.style.color = r.allowed ? "var(--ok)" : "var(--bad)";
     if (r.allowed && url) setTimeout(() => location.href = url, 900);
   } finally { btn.disabled = false; }

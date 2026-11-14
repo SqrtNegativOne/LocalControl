@@ -4,7 +4,9 @@
 """
 
 import argparse
+import tempfile
 import time
+from pathlib import Path
 
 from localcontrol.activity import Activity
 from localcontrol.config import Config
@@ -35,28 +37,44 @@ CASES = [
 ]
 
 
+class _PromptHistoryStub:
+    """Stands in for PromptHistory so record() never appends to the real prompts.json."""
+
+    def record(self, text: str, minutes: float):
+        pass
+
+    def forget(self, text: str):
+        pass
+
+    def top(self, n: int = 8) -> list[dict]:
+        return []
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=Config.model)
     ap.add_argument("--rule", default=RULE)
     a = ap.parse_args()
 
-    ctl = Controller(Config(model=a.model, vision="off", dry_run=True))
-    # Don't touch the real daemon's saved rule or event log.
-    ctl._save_policy = lambda: None
-    ctl._log = lambda *args, **kw: None
-    t0 = time.time()
-    p = ctl.set_policy(a.rule)
-    print(f"Parsed in {time.time() - t0:.1f}s: {p.rule!r}  ({'none' if p.expires_at is None else round((p.expires_at - p.started_at) / 60)} min)\n")
-
-    correct = 0
-    for act, want in CASES:
+    # Judge against a throwaway data dir: no real state.json (so an active rule
+    # can't refuse to run), and a stub history so prompts.json is never touched.
+    with tempfile.TemporaryDirectory(prefix="localcontrol-eval-") as tmp:
+        ctl = Controller(Config(model=a.model, vision="off", dry_run=True), data_dir=Path(tmp))
+        ctl.history = _PromptHistoryStub()
         t0 = time.time()
-        v = ctl._ask_llm(p, act)
-        ok = v.allowed == want
-        correct += ok
-        print(f"{'OK  ' if ok else 'FAIL'} {'ALLOW' if v.allowed else 'BLOCK'} {v.scope:4s} {time.time() - t0:4.1f}s  {act.label[:70]}\n    {v.reason}")
-    print(f"\n{correct}/{len(CASES)} as expected")
+        p = ctl.set_policy(a.rule)
+        print(f"Parsed in {time.time() - t0:.1f}s: {p.rule!r}  "
+              f"({'none' if p.expires_at is None else round((p.expires_at - p.started_at) / 60)} min)\n")
+
+        correct = 0
+        for act, want in CASES:
+            t0 = time.time()
+            v = ctl._ask_llm(p, act)
+            ok = v.allowed == want
+            correct += ok
+            print(f"{'OK  ' if ok else 'FAIL'} {'ALLOW' if v.allowed else 'BLOCK'} {v.scope:4s} "
+                  f"{time.time() - t0:4.1f}s  {act.label[:70]}\n    {v.reason}")
+        print(f"\n{correct}/{len(CASES)} as expected")
 
 
 if __name__ == "__main__":
