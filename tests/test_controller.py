@@ -201,6 +201,17 @@ class EvaluateFailClosedTests(unittest.TestCase):
         self.assertEqual(v.source, "builtin")
         self.assertEqual(llm.judge_calls, 0)
 
+    def test_extension_pages_are_builtin_allowed(self):
+        tmp = Path(tempfile.mkdtemp())
+        ctl, llm = make_controller(tmp)
+        ctl.policy = Policy(command="c", rule="r", started_at=0.0, expires_at=1e18)
+        for url in ("moz-extension://abc/index.html#/blocked?url=https%3A%2F%2Fespn.com",
+                    "chrome-extension://abc/blocked.html"):
+            v = ctl.evaluate(Activity(app="firefox", url=url, tab_title="Blocker"))
+            self.assertTrue(v.allowed)
+            self.assertEqual(v.source, "builtin")
+        self.assertEqual(llm.judge_calls, 0)
+
 
 class AppealRoundTripTests(unittest.TestCase):
     """Block a Firefox tab (no URL), appeal by block_id, then evaluate must

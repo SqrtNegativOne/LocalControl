@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("LOCALCONTROL_HOME") or Path.home() / ".localcontrol")
+# The port the launcher last bound, so later CLI calls find the same server even
+# when 8765 was taken and a free port was chosen instead.
+PORT_FILE = DATA_DIR / "port"
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -42,3 +45,33 @@ class Config:
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
+
+
+def _saved_port() -> str | None:
+    try:
+        return PORT_FILE.read_text().strip()
+    except OSError:
+        return None
+
+
+def default_port() -> int:
+    """The port to use when none is given: env, then the launcher's saved port, else 8765."""
+    for raw in (os.environ.get("LOCALCONTROL_PORT"), _saved_port()):
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535:
+            return port
+    return Config.port
+
+
+def save_port(port: int) -> None:
+    """Remember the bound port for later CLI calls (best effort)."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(PORT_FILE, str(port))
+    except OSError:
+        pass

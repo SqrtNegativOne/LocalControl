@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-from .config import Config
+from .config import Config, default_port, save_port
 
 
 def _api(port: int, path: str, body: dict | None = None) -> dict:
@@ -79,7 +79,7 @@ def _ensure_output() -> None:
 
 def main():
     ap = argparse.ArgumentParser(prog="localcontrol")
-    ap.add_argument("--port", type=int, default=Config.port)
+    ap.add_argument("--port", type=int, default=default_port())
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the monitor and dashboard")
@@ -124,6 +124,7 @@ def main():
             _ok, msg = ctl.llm.status()
             print(f"[localcontrol] model: {msg}")
             httpd = make_server(ctl)
+            save_port(httpd.server_address[1])
             threading.Thread(target=ctl.run, daemon=True).start()
             print(f"[localcontrol] dashboard: {cfg.base_url}" + ("  (dry run)" if cfg.dry_run else ""))
             if not a.no_open:

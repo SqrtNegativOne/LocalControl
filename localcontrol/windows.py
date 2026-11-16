@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from .activity import Activity, as_url, strip_window_suffix
+from .activity import Activity, as_url, infer_browser_app, strip_window_suffix
 from .config import DATA_DIR
 
 HRESULT = ctypes.c_long
@@ -495,6 +495,8 @@ def observe() -> Activity:
     else:
         app = Path(exe).stem if exe else (title or cls)
     act = Activity(app=app, window_title=title, process=cls, hwnd=hwnd, pid=pid)
+    if not act.browser:
+        act.app = infer_browser_app(exe, title, cls) or act.app
     if act.browser:
         act.url, act.tab_title = _browser_tab(act)
         act.tab_title = act.tab_title or strip_window_suffix(title)

@@ -2,7 +2,12 @@
 
 import unittest
 
-from localcontrol.activity import Activity, as_url, strip_window_suffix
+from localcontrol.activity import (
+    Activity,
+    as_url,
+    infer_browser_app,
+    strip_window_suffix,
+)
 
 
 class AsUrlTests(unittest.TestCase):
@@ -83,6 +88,40 @@ class StripWindowSuffixTests(unittest.TestCase):
 
     def test_none_title(self):
         self.assertEqual(strip_window_suffix(None), "")
+
+
+class InferBrowserAppTests(unittest.TestCase):
+    """Browsers still count as browsers when their executable was renamed."""
+
+    def test_firefox_run_from_a_tobedeleted_folder(self):
+        exe = r"C:\Program Files\Firefox Developer Edition\tobedeleted\moz55df517b-e356-4e50-946f-7a3e920fc9ad"
+        title = "Learn Python — Profile 4 — Firefox Developer Edition"
+        self.assertEqual(infer_browser_app(exe, title, "MozillaWindowClass"), "firefox")
+
+    def test_firefox_identified_by_the_title_suffix(self):
+        self.assertEqual(
+            infer_browser_app(r"C:\Somewhere\renamed.exe", "Docs — Mozilla Firefox", "MozillaWindowClass"),
+            "firefox")
+
+    def test_firefox_variants_are_recognised(self):
+        self.assertEqual(infer_browser_app("", "Docs — LibreWolf", "MozillaWindowClass"), "firefox")
+        self.assertEqual(infer_browser_app("", "Docs — Waterfox", "MozillaWindowClass"), "firefox")
+
+    def test_thunderbird_is_not_treated_as_firefox(self):
+        self.assertEqual(
+            infer_browser_app(r"C:\Program Files\Mozilla Thunderbird\thunderbird.exe",
+                              "Inbox — Mozilla Thunderbird", "MozillaWindowClass"),
+            "")
+
+    def test_chromium_run_from_a_renamed_executable(self):
+        exe = r"C:\Program Files\Google\Chrome\Application\tobedeleted\abcdef"
+        self.assertEqual(infer_browser_app(exe, "Docs - Google Chrome", "Chrome_WidgetWin_1"), "chrome")
+
+    def test_chromium_identified_by_the_title_suffix(self):
+        self.assertEqual(infer_browser_app("", "Docs - Google Chrome", "Chrome_WidgetWin_1"), "chrome")
+
+    def test_unknown_window_class_is_not_a_browser(self):
+        self.assertEqual(infer_browser_app("", "Docs - Google Chrome", "Notepad"), "")
 
 
 class ActivityPropertyTests(unittest.TestCase):

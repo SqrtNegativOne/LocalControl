@@ -37,6 +37,8 @@ BLANK_URL_PREFIXES = (
     "chrome://newtab", "about:blank", "about:newtab", "about:home", "edge://newtab",
     "brave://newtab", "favorites://", "arc://", "chrome-search://",
 )
+# Another extension's own block page must not start a redirect fight with ours.
+EXTENSION_URL_PREFIXES = ("moz-extension://", "chrome-extension://", "extension://")
 
 PARSE_SCHEMA = {
     "type": "object",
@@ -350,6 +352,8 @@ class Controller:
         if act.browser:
             if act.url.startswith(self.cfg.base_url):
                 return Verdict(True, "LocalControl", source="builtin")
+            if act.url.startswith(EXTENSION_URL_PREFIXES):
+                return Verdict(True, "Browser extension page", source="builtin")
             if act.url.startswith(BLANK_URL_PREFIXES) or not (act.url or act.tab_title):
                 return Verdict(True, "Blank tab", source="builtin")
         return None

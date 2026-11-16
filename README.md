@@ -35,9 +35,23 @@ returns; any left behind by a crash are pruned after a day.
 
 ## Quick start
 
+Double-click **`LocalControl.vbs`**. It starts the monitor without a terminal
+window and opens the dashboard in your browser, so it behaves like an app.
+
+Or start it from a shell:
+
 ```powershell
 uv run localcontrol serve          # dashboard at http://127.0.0.1:8765
 ```
+
+The launcher prefers port 8765 but takes the first free port after it if 8765
+is already in use (it is AnkiConnect's default). The chosen port is saved in
+`%USERPROFILE%\.localcontrol\port` and reused by the CLI. Pass `--port N` to
+`localcontrol` to override it.
+
+If another browser extension blocks sites for you, allow `127.0.0.1` (or
+`localhost`) in that extension. Otherwise it can hide both this dashboard and
+LocalControl's block page.
 
 Set a rule from the dashboard or the command line:
 
@@ -96,19 +110,22 @@ Windows-level network filtering is not implemented, so blocking happens per fore
 
 ```text
 pyproject.toml
+LocalControl.vbs         # double-click launcher (hidden server, then dashboard)
 eval_judge.py            # checks the judge prompt on canned activities
 localcontrol/
   __main__.py            # CLI: serve, cmd, status, install, ...
+  config.py              # data dir, runtime config, saved-port discovery
   controller.py          # policy state, judgments, enforcement, usage
   windows.py             # Win32, UI Automation and MSAA desktop integration
   winservice.py          # Task Scheduler tasks and watchdog
   activity.py            # current-activity model
+  history.py             # saved rule prompts
   llm.py                 # Ollama and llama.app clients
   server.py              # local dashboard and JSON API
   static/                # dashboard and block page (served by server.py)
 ```
 
-Data lives in `%USERPROFILE%\.localcontrol` (override with `LOCALCONTROL_HOME`). The service writes `server.log` and `guard.log` there. To see what LocalControl can read on your machine:
+Data lives in `%USERPROFILE%\.localcontrol` (override with `LOCALCONTROL_HOME`). The launcher records its port in `port` there, and the service writes `server.log` and `guard.log`. To see what LocalControl can read on your machine:
 
 ```powershell
 uv run python -m localcontrol.windows

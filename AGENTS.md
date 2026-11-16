@@ -14,15 +14,18 @@ Apple platform code back.
 
 ```text
 pyproject.toml
+LocalControl.vbs       # double-click launcher: hidden server plus dashboard
 eval_judge.py          # offline check of the judge prompt on canned activities
 tests/                 # stdlib unittest suite for the pure and platform-neutral pieces
 localcontrol/
   __main__.py          # CLI: serve, cmd, history, status, stop, install, uninstall, guard
+  config.py            # data dir, runtime config, saved-port discovery
   controller.py        # policy state, judgments, enforcement, usage, main loop
   desktop.py           # the Windows backend seam imported by the controller
   windows.py           # Win32, UI Automation, MSAA, notifications, screenshots
   winservice.py        # Task Scheduler install/uninstall and the watchdog
   activity.py          # current-activity model and browser URL normalization
+  history.py           # saved rule prompts
   llm.py               # Ollama and llama.app clients, backend auto-selection
   server.py            # local dashboard and JSON API
   static/              # dashboard and block page, served by server.py
@@ -41,6 +44,7 @@ ships it as package data.
 - Desktop probe (foreground app, browser URL, screenshot): `uv run python -m localcontrol.windows`
 - Judge evaluation: `uv run python eval_judge.py`
 - Serve locally: `uv run localcontrol serve --dry-run --no-open`
+- Launcher: `LocalControl.vbs` (starts Python windowless, then opens the dashboard)
 
 The app has no runtime dependencies beyond the Python standard library and
 Windows APIs.
@@ -55,4 +59,8 @@ Windows APIs.
 - Do not log rules, prompts, or activity to remote services.
 - Runtime data lives in `%USERPROFILE%\.localcontrol`; override with
   `LOCALCONTROL_HOME`.
+- The dashboard binds 127.0.0.1. The launcher uses 8765, or the first free port
+  after it (8765 is AnkiConnect's default), and records the choice in
+  `%USERPROFILE%\.localcontrol\port`. The CLI reuses that port unless `--port`
+  is given.
 - Do not commit unless the user asks.

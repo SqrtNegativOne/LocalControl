@@ -1,6 +1,7 @@
 """Tests for persistence: atomic writes, Policy round trips, and PromptHistory."""
 
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -44,6 +45,37 @@ class AtomicWriteTextTests(unittest.TestCase):
             atomic_write_text(self.path, "new content")
         self.assertFalse(self.path.exists())
         self.assertFalse(self.path.with_name(self.path.name + ".tmp").exists())
+
+
+class PortDiscoveryTests(unittest.TestCase):
+    """The launcher's chosen port is remembered so later CLI calls find it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        for name, value in (("DATA_DIR", self.tmp), ("PORT_FILE", self.tmp / "port")):
+            patcher = mock.patch.object(config_mod, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_saved_port_is_the_default(self):
+        config_mod.save_port(8791)
+        with mock.patch.dict(os.environ, {"LOCALCONTROL_PORT": ""}):
+            self.assertEqual(config_mod.default_port(), 8791)
+
+    def test_env_port_overrides_the_saved_one(self):
+        config_mod.save_port(8791)
+        with mock.patch.dict(os.environ, {"LOCALCONTROL_PORT": "9000"}):
+            self.assertEqual(config_mod.default_port(), 9000)
+
+    def test_invalid_saved_port_falls_back(self):
+        (self.tmp / "port").write_text("not-a-port")
+        with mock.patch.dict(os.environ, {"LOCALCONTROL_PORT": ""}):
+            self.assertEqual(config_mod.default_port(), Config.port)
+
+    def test_saved_port_is_written_atomically(self):
+        config_mod.save_port(8792)
+        self.assertEqual((self.tmp / "port").read_text(), "8792")
+        self.assertFalse((self.tmp / "port.tmp").exists())
 
 
 class PolicyRoundTripTests(unittest.TestCase):

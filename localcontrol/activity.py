@@ -56,6 +56,31 @@ def strip_window_suffix(title: str) -> str:
     return _PROFILE_SUFFIX.sub("", _WINDOW_SUFFIX.sub("", title or "")).strip()
 
 
+def infer_browser_app(exe: str, title: str, window_class: str) -> str:
+    """A browser executable stem inferred from the window itself.
+
+    Firefox updates move the running copy into a GUID-named ``tobedeleted``
+    folder, so the executable stem is no longer "firefox" and the activity
+    would otherwise be treated as a non-browser. The window class and browser
+    suffix in the title still identify it.
+    """
+    path = (exe or "").lower()
+    suffix = _WINDOW_SUFFIX.search(title or "")
+    suffix_text = suffix.group(0) if suffix else ""
+    if window_class == "MozillaWindowClass":
+        if any(name in path for name in ("firefox", "librewolf", "waterfox", "zen")):
+            return "firefox"
+        if re.search(r"Firefox|LibreWolf|Waterfox", suffix_text):
+            return "firefox"
+    if window_class in ("Chrome_WidgetWin_0", "Chrome_WidgetWin_1"):
+        if any(name in path for name in ("chrome", "msedge", "brave", "vivaldi", "opera",
+                                         "arc", "thorium", "yandex")):
+            return "chrome"
+        if re.search(r"Chrome|Chromium|Brave|Edge|Vivaldi|Opera|Arc", suffix_text):
+            return "chrome"
+    return ""
+
+
 def as_url(text: str) -> str:
     """Turn an address-bar string into a URL, or "" when it's really a search query.
 
